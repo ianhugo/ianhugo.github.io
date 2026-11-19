@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Knowledge State Protocol · Ian Yuen</title>
+  <meta name="description" content="Knowledge State Protocol (KSP): coordinating ontologies, knowledge graphs and AMR event ledgers so AI systems can reason over concepts, facts and time. EMNLP 2026 AKBC Workshop.">
+  <meta property="og:title" content="Knowledge State Protocol: HTTP for Meaning">
+  <meta property="og:description" content="Coordinating ontologies, knowledge graphs and AMR event ledgers to reason over concepts, facts and time.">
+  <meta property="og:image" content="../../assets/img/pubs/ksp.png">
+  <meta name="theme-color" content="#faf9f6">
+  <script>
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../assets/css/site.css">
+  <style>
+    /* ===== KSP explorer ===== */
+    .explorer { max-width: 1100px; margin: 8px auto 0; padding: 0 24px; }
+    .ex-card {
+      display: grid; grid-template-columns: minmax(0, 1fr) 340px;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-card); box-shadow: var(--shadow); overflow: hidden;
+    }
+    .ex-stage { position: relative; height: 560px; min-width: 0; overflow: hidden; cursor: grab; }
+    .ex-stage:active { cursor: grabbing; }
+    .ex-stage canvas { display: block; width: 100%; height: 100%; }
+    .ex-labels { position: absolute; inset: 0; pointer-events: none; }
+    .nlabel {
+      position: absolute; left: 0; top: 0; white-space: nowrap;
+      font-family: var(--font-mono); font-size: 10.5px; line-height: 1.2;
+      padding: 1px 6px; border-radius: 6px;
+      color: var(--text); background: color-mix(in srgb, var(--bg-card) 80%, transparent);
+      border: 1px solid color-mix(in srgb, var(--c) 30%, transparent);
+      transition: opacity 0.35s, border-color 0.35s, box-shadow 0.35s;
+      will-change: transform;
+    }
+    .nlabel.dim { opacity: 0.28; }
+    .nlabel.hit { border-color: var(--pc); box-shadow: 0 0 0 2px color-mix(in srgb, var(--pc) 30%, transparent); font-weight: 500; opacity: 1; }
+    .nlabel.gone { opacity: 0 !important; }
+    .llabel {
+      position: absolute; left: 0; top: 0; white-space: nowrap;
+      font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+      letter-spacing: 0.12em; text-transform: uppercase; color: var(--c); opacity: 0.85;
+    }
+    .ex-overlay {
+      position: absolute; left: 14px; right: 14px; top: 12px;
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap;
+      pointer-events: none;
+    }
+    .ex-legend { display: flex; gap: 6px; flex-wrap: wrap; }
+    .ex-legend .chip { background: color-mix(in srgb, var(--bg-card) 85%, var(--c) 8%); }
+    .ex-clock {
+      font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);
+      background: color-mix(in srgb, var(--bg-card) 85%, transparent);
+      border: 1px solid var(--border); border-radius: 100px; padding: 3px 10px;
+      transition: color 0.3s, border-color 0.3s;
+    }
+    .ex-clock b { color: var(--text); font-weight: 500; }
+    .ex-clock.advanced { color: var(--c-amr); border-color: color-mix(in srgb, var(--c-amr) 45%, transparent); }
+    .ex-clock.advanced b { color: var(--c-amr); }
+    .ex-hint {
+      position: absolute; left: 14px; bottom: 12px; font-family: var(--font-mono);
+      font-size: 11px; color: var(--text-muted); pointer-events: none;
+    }
+    .ex-fallback { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 56px 20px 20px; background: var(--mat); }
+    .ex-fallback img { max-width: 100%; max-height: 100%; }
+    .ex-stage.no-webgl .ex-fallback { display: flex; }
+    .ex-stage.no-webgl .ex-hint, .ex-stage.no-webgl .ex-clock { display: none; }
+
+    .ex-side {
+      border-left: 1px solid var(--border); padding: 18px;
+      display: flex; flex-direction: column; gap: 10px; min-width: 0;
+    }
+    .ex-label {
+      font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);
+      letter-spacing: 0.06em; text-transform: uppercase;
+    }
+    .ex-label + .ex-label, .ex-trace + .ex-label { margin-top: 6px; }
+    .qbtns { display: flex; flex-direction: column; gap: 6px; }
+    .qbtn {
+      --pc: var(--accent);
+      display: flex; flex-direction: column; align-items: flex-start; gap: 5px;
+      width: 100%; text-align: left; cursor: pointer;
+      padding: 10px 12px; border-radius: var(--radius-sm);
+      border: 1px solid var(--border); background: transparent;
+      color: var(--text); font: 500 14px/1.45 var(--font-sans);
+      transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+    }
+    .qbtn:hover { border-color: color-mix(in srgb, var(--pc) 55%, transparent); }
+    .qbtn[aria-pressed="true"] {
+      border-color: var(--pc); background: color-mix(in srgb, var(--pc) 8%, transparent);
+      box-shadow: inset 3px 0 0 var(--pc);
+    }
+    .qbtn .chip { font-size: 10px; }
+
+    .ex-trace { list-style: none; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; counter-reset: step; }
+    .ex-empty { font-size: 13.5px; color: var(--text-muted); line-height: 1.6; padding: 4px 0; }
+    .tstep {
+      counter-increment: step; position: relative;
+      padding: 7px 10px 7px 32px; border-radius: var(--radius-sm);
+      font-size: 13.5px; line-height: 1.5; color: var(--text-secondary);
+      opacity: 0.32; transition: opacity 0.35s, background 0.35s;
+    }
+    .tstep::before {
+      content: counter(step); position: absolute; left: 8px; top: 8px;
+      width: 17px; height: 17px; border-radius: 50%;
+      font: 500 10px/17px var(--font-mono); text-align: center;
+      color: var(--c); border: 1px solid color-mix(in srgb, var(--c) 50%, transparent);
+    }
+    .tstep.on { opacity: 1; }
+    .tstep.now { background: color-mix(in srgb, var(--c) 9%, transparent); }
+    .tstep .formal { display: block; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-top: 2px; word-break: break-word; }
+    .tstep .lay { font-family: var(--font-mono); font-size: 10px; color: var(--c); letter-spacing: 0.04em; text-transform: uppercase; display: block; }
+    .ex-answer {
+      border-radius: var(--radius-sm); padding: 12px 14px; font-size: 14px; line-height: 1.6;
+      border: 1px solid color-mix(in srgb, var(--pc, var(--accent)) 45%, transparent);
+      background: color-mix(in srgb, var(--pc, var(--accent)) 7%, transparent);
+      color: var(--text);
+      opacity: 0; transform: translateY(6px); transition: opacity 0.4s, transform 0.4s;
+    }
+    .ex-answer.show { opacity: 1; transform: none; }
+    .ex-answer[hidden] { display: none; }
+    .ex-answer .ex-label { display: block; margin-bottom: 4px; color: var(--pc, var(--accent)); }
+    .ex-answer .note { display: block; margin-top: 6px; font-size: 12.5px; color: var(--text-muted); }
+
+    @media (max-width: 900px) {
+      .ex-card { grid-template-columns: 1fr; }
+      .ex-side { border-left: 0; border-top: 1px solid var(--border); }
+      .ex-stage { height: 420px; }
+    }
+    @media (max-width: 768px) {
+      .explorer { padding: 0 16px; }
+      .ex-stage { height: 420px; cursor: default; }
+      .nlabel { font-size: 9.5px; padding: 1px 4px; }
+      .nlabel.dim { opacity: 0; }          /* small screens: show only labels that matter */
+      .llabel { display: none; }           /* the legend already names the layers */
+      .ex-overlay { left: 10px; right: 10px; top: 10px; }
+      .ex-legend { gap: 4px; }
+      .ex-legend .chip { font-size: 9.5px; padding: 0 7px; }
+      .ex-clock { position: absolute; right: 0; top: calc(420px - 44px); font-size: 10px; }
+      .ex-hint { left: 10px; bottom: 14px; font-size: 10px; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav class="nav" aria-label="Main">
+    <div class="nav-inner">
+      <a href="../../" class="nav-logo">Ian Yuen</a>
+      <div class="nav-links">
+        <a href="../../#news">News</a>
+        <a href="../../#research">Research</a>
+        <button id="theme-toggle" type="button" aria-label="Toggle dark mode">
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+    <article>
+      <div class="post">
+        <a class="post-back" href="../../#research">← Back to research</a>
+        <p class="post-kicker">// Research · EMNLP 2026 · AKBC Workshop</p>
+        <h1>Knowledge State Protocol: HTTP for Meaning</h1>
+        <p class="post-dek">Knowledge graphs store facts, but not what those facts <em>are</em> or how they <em>change</em>. KSP brings three standard knowledge representations together so a system can reason across concepts, facts, and time.</p>
+        <div class="post-meta">
+          <span><strong>Ian Yuen</strong></span>
+          <a class="pub-link" href="https://aclanthology.org/2026.akbc-1.10/" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.41l-9.29 9.3-1.42-1.42 9.3-9.29H14V3zM5 5h6v2H5v12h12v-6h2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>Paper
+          </a>
+        </div>
+
+        <div class="post-body">
+          <h2 id="motivation"><span class="hash">01</span> Why: one sentence, many layers of meaning</h2>
+          <p>Large language models answer questions well, but what they know is hard to inspect, attribute, or update. In enterprise and specialized settings, much of the knowledge that matters is also private, domain-specific, or changing, so the model never saw it during training. A common fix is to retrieve from an external knowledge base, and <strong>knowledge-graph RAG</strong> goes a step further than plain text retrieval by storing entities and their relations explicitly.</p>
+          <p>But a knowledge graph captures only part of what a text means. Its subject–relation–object triples hold the facts that were stated, and two kinds of context keep falling through:</p>
+          <ul>
+            <li><strong>Conceptual context</strong>: <em>"X is a type of Y."</em> A question about a concept fails when that concept never appears in the data.</li>
+            <li><strong>Temporal context</strong>: <em>"A happened before B, and changed C."</em> A graph of the current state forgets how it got there.</li>
+          </ul>
+          <p>Recent systems patch these gaps one at a time, adding timestamps here and ontology concepts there, or they re-encode everything into a custom graph schema built for one domain.</p>
+          <div class="callout">
+            <strong>The observation behind KSP:</strong> each gap already has a well-established representation built for it. What's missing is a shared protocol that lets those representations work together.
+          </div>
+
+          <table class="kr-table">
+            <thead><tr><th>What language does</th><th>Best-fit representation</th><th>Why</th></tr></thead>
+            <tbody>
+              <tr><td>Refers to entities and facts</td><td data-label="Best fit"><span class="chip c-kg">Knowledge graph</span></td><td data-label="Why">Durable, extensible memory of who and what.</td></tr>
+              <tr><td>Composes events (who did what to whom)</td><td data-label="Best fit"><span class="chip c-amr">AMR</span></td><td data-label="Why">Explicit predicate–argument structure, negation, and scope.</td></tr>
+              <tr><td>Abstracts into classes, roles, rules</td><td data-label="Best fit"><span class="chip c-onto">Ontology</span></td><td data-label="Why">Inheritance, constraints, and generalization.</td></tr>
+              <tr><td>Talks about time and change</td><td data-label="Best fit"><span class="chip c-amr">AMR event ledger</span></td><td data-label="Why">An ordered history of events that update the facts.</td></tr>
+              <tr><td>Separates claims from facts</td><td data-label="Best fit"><span class="chip c-onto">Ontology</span></td><td data-label="Why">Treats sources and evidence as first-class concepts.</td></tr>
+            </tbody>
+          </table>
+          <p style="font-size:13px;color:var(--text-muted)">Simplified from Table 1 of the paper.</p>
+
+          <h2 id="what"><span class="hash">02</span> What: a protocol that coordinates three layers</h2>
+          <p>KSP coordinates three existing representations, one for each layer of meaning. HTTP standardizes how systems talk to each other without dictating how each one stores its data. In the same way, KSP defines the shared primitives and mappings between representations without prescribing what goes on inside them.</p>
+
+          <div class="layer-grid">
+            <div class="layer-card c-onto">
+              <span class="chip c-onto">Ontology</span>
+              <h3>Concepts</h3>
+              <p>Domain concepts, roles, and the constraints between them.</p>
+              <span class="q">“What kind of thing is this?”</span>
+            </div>
+            <div class="layer-card c-kg">
+              <span class="chip c-kg">Knowledge graph</span>
+              <h3>Instances</h3>
+              <p>Concrete entities and the facts that connect them.</p>
+              <span class="q">“What is true right now?”</span>
+            </div>
+            <div class="layer-card c-amr">
+              <span class="chip c-amr">AMR event ledger</span>
+              <h3>Time</h3>
+              <p>Each sentence-level event, parsed into AMR and stored in order.</p>
+              <span class="q">“What happened, and what did it change?”</span>
+            </div>
+          </div>
+
+          <h3>How the layers connect</h3>
+          <ul>
+            <li><strong>One shared primitive.</strong> Every layer represents objects as nodes, so a node in one layer can be aligned with its counterpart in another.</li>
+            <li><strong>Concepts ↔ instances.</strong> KG entities are linked to ontology concepts by <em>instance-of</em> edges. A question about a concept that never appears in the text can travel up through the ontology and back down to concrete entities.</li>
+            <li><strong>Events → state.</strong> Each AMR event is anchored to the KG entities it mentions, and its predicate becomes a graph operation. Replaying the ledger forward or backward rebuilds the knowledge state at any point in time, much like version control.</li>
+          </ul>
+
+          <figure>
+            <span class="mat"><img src="../../assets/img/ksp/architecture.png" alt="Diagram of KSP's three layers: an ontology layer with concepts X and Y, a knowledge graph layer whose instances A and B link up to those concepts, and an AMR ledger of events 1 to 4 ordered along a time axis." width="1400" height="1174" loading="lazy"></span>
+            <figcaption>KSP architecture. Instances in the knowledge graph link to concepts in the ontology, and each event in the AMR ledger is applied to the knowledge graph in order.</figcaption>
+          </figure>
+
+          <h2 id="demo"><span class="hash">03</span> See it work: follow a question through the layers</h2>
+          <p>Take a small example from finance. The source text describes four events:</p>
+          <ul class="ledger">
+            <li><time>2020-01-01</time>Banco do Brasil issues a loan to Transnet.</li>
+            <li><time>2020-01-01</time>Standard Bank guarantees the loan.</li>
+            <li><time>2022-07-01</time>Transnet misses a payment, and the loan enters default.</li>
+            <li><time>2022-07-01</time>As a result, the interest rate rises from SOFR + 2% to SOFR + 5%, and the exposure is reclassified from performing to non-performing.</li>
+          </ul>
+          <p>Below, that scenario is stored in all three KSP layers. <strong>Click a question</strong> to watch KSP answer it. The reasoning path lights up across the layers one step at a time, and each step is listed beside the view. Temporal questions replay the ledger, so watch the knowledge-state date move forward and a new <em>Default_001</em> node appear.</p>
+        </div>
+      </div>
+
+      <section class="explorer" aria-label="Interactive KSP reasoning explorer">
+        <div class="ex-card">
+          <div class="ex-stage" id="ex-stage">
+            <div class="ex-labels" id="ex-labels" aria-hidden="true"></div>
+            <div class="ex-fallback"><img src="../../assets/img/pubs/ksp.png" alt="Static diagram of the ontology and knowledge graph layers for the Transnet loan example."></div>
+            <div class="ex-overlay">
+              <div class="ex-legend">
+                <span class="chip c-onto">Ontology</span>
+                <span class="chip c-kg">Knowledge graph</span>
+                <span class="chip c-amr">AMR ledger</span>
+              </div>
+              <div class="ex-clock" id="ex-clock" aria-live="polite">Knowledge state · <b>2020-01-01</b></div>
+            </div>
+            <div class="ex-hint" id="ex-hint">Drag to rotate</div>
+          </div>
+
+          <div class="ex-side">
+            <span class="ex-label">1 · Pick a question</span>
+            <div class="qbtns" id="qbtns"></div>
+            <span class="ex-label">2 · Follow the reasoning</span>
+            <ol class="ex-trace" id="ex-trace" aria-live="polite">
+              <li class="ex-empty">Choose a question above. Its path will light up in the view, one step at a time.</li>
+            </ol>
+            <div class="ex-answer" id="ex-answer" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="post">
+        <div class="post-body" style="margin-top:0">
+          <h2 id="next"><span class="hash">04</span> What's next</h2>
+          <ul>
+            <li><strong>A benchmark that checks the whole chain.</strong> We propose <em>Full-Chain Accuracy</em>: an answer counts only if the system picks the right knowledge state, follows a valid ontology-constrained path, gets the answer right, and gives a valid derivation. This also shows which layer an error came from.</li>
+            <li><strong>Neuro-symbolic training.</strong> With AMR events stored as graph updates, link prediction can extend to forecasting future events, the edges they will change, and the resulting state, with the ontology ruling out transitions that make no sense.</li>
+            <li><strong>Across modalities and languages.</strong> "An object is a node" also holds for scene graphs and across languages, so the same protocol could align visual and textual events in one knowledge state.</li>
+          </ul>
+          <p>Open challenges remain: agreeing on shared primitives and governance, keeping ledger replay efficient at scale (for example by checkpointing), and stopping parser errors from spreading between layers.</p>
+        </div>
+      </div>
+
+      <div class="post-end">
+        <hr>
+        <div class="post-meta">
+          <a class="pub-link primary" href="https://aclanthology.org/2026.akbc-1.10/" target="_blank" rel="noopener">Read the paper <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="pub-link" href="../../#research">← Back to research</a>
+        </div>
+      </div>
+    </article>
+  </main>
+
+  <footer>
+    <p>&copy; <span id="year">2026</span> Ian Yuen</p>
+  </footer>
+
+  <script src="../../assets/js/site.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="ksp-explorer.js"></script>
+</body>
+</html>

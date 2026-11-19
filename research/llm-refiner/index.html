@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM-Refiner · Ian Yuen</title>
+  <meta name="description" content="LLM-Refiner: an LLM post-editing pipeline that diagnoses and repairs semantic errors in strong AMR parsers. EACL 2027.">
+  <meta property="og:title" content="LLM-Refiner: Putting Meaning Back in AMR">
+  <meta property="og:description" content="Using LLMs to repair the semantic errors of strong AMR parsers.">
+  <meta property="og:image" content="../../assets/img/pubs/llm-refiner.png">
+  <meta name="theme-color" content="#faf9f6">
+  <script>
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../assets/css/site.css">
+  <style>
+    /* Stage colours (match the paper's pipeline figure, tuned per theme) */
+    :root {
+      --st-io: #c27c0e; --st-1: var(--c-kg); --st-m1: #0f9494; --st-m2: var(--c-onto);
+      --st-m3: var(--c-mix); --st-val: #4f6fc4;
+      --del: var(--c-amr); --add: var(--c-kg);
+    }
+    [data-theme="dark"] { --st-io: #f0b44c; --st-m1: #3fd0cf; --st-val: #8fa8ef; }
+
+    .wide { max-width: 1000px; margin: 8px auto 0; padding: 0 24px; }
+    .card {
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-card); box-shadow: var(--shadow);
+    }
+
+    /* ---------- Pipeline diagram ---------- */
+    .wt-diagram { padding: 18px 18px 6px; }
+    .wt-diagram svg { display: block; width: 100%; height: auto; overflow: visible; }
+    .pgroup rect { fill: none; stroke: var(--text-muted); stroke-opacity: 0.45; stroke-dasharray: 5 5; }
+    .pgroup text { font: 500 11.5px var(--font-mono); fill: var(--text-muted); }
+    .pnode { cursor: pointer; transition: opacity 0.35s; }
+    .pnode rect {
+      fill: color-mix(in srgb, var(--s) 10%, var(--bg-card));
+      stroke: color-mix(in srgb, var(--s) 55%, transparent); stroke-width: 1.5;
+      transition: fill 0.3s, stroke-width 0.3s;
+    }
+    .pnode text { font: 500 13.5px var(--font-sans); fill: var(--text); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+    .pnode text.sub { font: 400 10.5px var(--font-mono); fill: var(--text-muted); }
+    .pnode.future { opacity: 0.4; }
+    .pnode.active rect { fill: color-mix(in srgb, var(--s) 22%, var(--bg-card)); stroke: var(--s); stroke-width: 2.5; }
+    .pnode:hover rect, .pnode:focus-visible rect { stroke: var(--s); }
+    .pnode:focus { outline: none; }
+    .pedge path { fill: none; stroke: var(--text-muted); stroke-opacity: 0.5; stroke-width: 1.5; transition: stroke 0.3s, stroke-opacity 0.3s; }
+    .pedge.retry path { stroke-dasharray: 4 4; }
+    .pedge text { font: 400 10.5px var(--font-mono); fill: var(--text-muted); text-anchor: middle; }
+    .pedge text.bg { stroke: var(--bg-card); stroke-width: 4px; stroke-linejoin: round; }
+    .pedge.flow path { stroke: var(--accent); stroke-opacity: 1; stroke-width: 2; stroke-dasharray: 7 5; animation: flow 0.9s linear infinite; }
+    .pedge.flow text { fill: var(--accent); }
+    .pedge.flow.retry path { stroke: var(--del); }
+    .pedge.flow.retry text { fill: var(--del); }
+    @keyframes flow { to { stroke-dashoffset: -24; } }
+    .arrowhead { fill: var(--text-muted); }
+    .arrowhead.on { fill: var(--accent); }
+
+    /* ---------- Walkthrough panel ---------- */
+    .wt-panel { border-top: 1px solid var(--border); padding: 18px 22px 22px; }
+    .wt-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .wt-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); letter-spacing: 0.04em; }
+    .wt-title { font-size: 18px; font-weight: 600; color: var(--text); margin-top: 2px; display: flex; align-items: center; gap: 8px; }
+    .wt-title::before { content: ''; width: 10px; height: 10px; border-radius: 3px; background: var(--s, var(--accent)); flex-shrink: 0; }
+    .wt-controls { display: flex; align-items: center; gap: 6px; }
+    .wt-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      height: 34px; min-width: 34px; padding: 0 12px; border-radius: 100px; cursor: pointer;
+      border: 1px solid var(--border); background: transparent; color: var(--text-secondary);
+      font: 500 12.5px var(--font-mono); transition: all 0.2s;
+    }
+    .wt-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+    .wt-btn:disabled { opacity: 0.35; cursor: default; }
+    .wt-btn.play { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); padding: 0 16px; }
+    .wt-btn.play:hover { background: var(--accent); color: var(--bg-card); }
+    .wt-dots { display: flex; gap: 6px; margin: 14px 0 4px; }
+    .wt-dot {
+      flex: 1; height: 4px; border-radius: 4px; border: 0; padding: 0; cursor: pointer;
+      background: var(--border); position: relative; overflow: hidden;
+    }
+    .wt-dot::after { content: ''; position: absolute; inset: -8px 0; } /* bigger hit area */
+    .wt-dot.done { background: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .wt-dot.active { background: var(--accent); }
+    .wt-body { min-height: 250px; margin-top: 14px; }
+    .wt-body > p { color: var(--text-secondary); font-size: 15px; line-height: 1.75; margin-bottom: 14px; max-width: 70ch; }
+    .wt-body > p strong { color: var(--text); }
+    .wt-fade { animation: fadeIn 0.35s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    .out-label { display: block; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0.05em; text-transform: uppercase; margin: 4px 0 6px; }
+    .quote {
+      font-family: var(--font-serif); font-size: 21px; line-height: 1.5; color: var(--text);
+      padding: 14px 18px; border-left: 3px solid var(--st-io); background: color-mix(in srgb, var(--st-io) 6%, transparent);
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    }
+    .quote mark { background: color-mix(in srgb, var(--del) 20%, transparent); color: var(--del); border-radius: 3px; padding: 0 3px; }
+    .quote del, .sentence del { color: var(--del); text-decoration-thickness: 2px; }
+    .amr {
+      font-family: var(--font-mono); font-size: 13px; line-height: 1.75;
+      background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: 12px 14px; overflow-x: auto; white-space: pre; color: var(--text-secondary);
+    }
+    .amr .c { color: var(--text); font-weight: 500; }
+    .amr .r { color: var(--accent); }
+    .amr .line { display: block; padding: 0 6px; margin: 0 -6px; border-radius: 4px; }
+    .amr .line.del { background: color-mix(in srgb, var(--del) 12%, transparent); text-decoration: line-through; text-decoration-color: var(--del); }
+    .amr .line.add { background: color-mix(in srgb, var(--add) 14%, transparent); }
+    .amr .line.del::before { content: '−'; color: var(--del); position: absolute; margin-left: -14px; }
+    .amr .line.add::before { content: '+'; color: var(--add); position: absolute; margin-left: -14px; }
+    .amr .line.del, .amr .line.add { padding-left: 18px; margin-left: -18px; position: relative; }
+    .amr .line.spot { background: color-mix(in srgb, var(--st-io) 14%, transparent); }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .mini-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+    .mini-table th, .mini-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .mini-table th { font: 500 11px var(--font-mono); color: var(--text-muted); letter-spacing: 0.04em; }
+    .mini-table td { color: var(--text-secondary); }
+    .mini-table td:first-child { color: var(--text); font-weight: 500; }
+    .mini-table code, .k { font-family: var(--font-mono); font-size: 12.5px; }
+    .mini-table tr.flag td { background: color-mix(in srgb, var(--del) 8%, transparent); }
+    .mini-table tr.flag td.bad { color: var(--del); font-weight: 600; }
+    .tag {
+      display: inline-block; font: 500 10.5px var(--font-mono); letter-spacing: 0.03em;
+      padding: 1px 8px; border-radius: 100px; border: 1px solid currentColor; white-space: nowrap;
+    }
+    .tag.bad { color: var(--del); } .tag.good { color: var(--add); } .tag.muted { color: var(--text-muted); }
+    .diag {
+      border: 1px solid color-mix(in srgb, var(--st-m2) 40%, transparent); border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--st-m2) 6%, transparent); padding: 12px 14px; font-size: 14px; line-height: 1.65; color: var(--text-secondary);
+    }
+    .diag strong { color: var(--text); }
+    .diag + .diag { margin-top: 8px; }
+    .cand { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 14px; color: var(--text-secondary); }
+    .cand + .cand { margin-top: 6px; }
+    .cand.dropped { opacity: 0.55; }
+    .cand.dropped .what { text-decoration: line-through; }
+    .ok-line { font-family: var(--font-mono); font-size: 13px; color: var(--text-secondary); padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+    .ok-line .good { color: var(--add); font-weight: 500; }
+
+    /* ---------- Case study ---------- */
+    .cs-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 22px 0 10px; }
+    .cs-box { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); padding: 16px 18px; }
+    .cs-box h4 { font: 500 11px var(--font-mono); color: var(--text-muted); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 10px; display: flex; justify-content: space-between; gap: 8px; }
+    .cs-box.gold { border-top: 3px solid var(--st-io); }
+    .cs-box.ours { border-top: 3px solid var(--st-m3); }
+    .tree { font-family: var(--font-mono); font-size: 14px; line-height: 1.9; color: var(--text); white-space: pre; overflow-x: auto; }
+    .tree .del { color: var(--del); text-decoration: line-through; }
+    .tree .add { color: var(--add); font-weight: 500; }
+    .tree .who { font-size: 10.5px; color: var(--text-muted); text-decoration: none; display: inline-block; margin-left: 8px; }
+    .sentence { font-family: var(--font-serif); font-size: 17px; line-height: 1.55; color: var(--text); }
+
+    .nb { display: grid; grid-template-columns: 1fr 1fr; gap: 0; overflow: hidden; margin: 22px 0 8px; }
+    .nb-graph { padding: 16px; border-right: 1px solid var(--border); display: flex; align-items: center; }
+    .nb-graph svg { width: 100%; height: auto; display: block; }
+    .g-node rect { fill: var(--bg-card); stroke: var(--text-muted); stroke-opacity: 0.6; stroke-width: 1.3; transition: stroke 0.25s, fill 0.25s; }
+    .g-node text { font: 500 13.5px var(--font-mono); fill: var(--text); text-anchor: middle; dominant-baseline: central; }
+    .g-node.on rect { stroke: var(--accent); stroke-opacity: 1; stroke-width: 2; fill: var(--accent-soft); }
+    .g-edge path { fill: none; stroke: var(--text-muted); stroke-opacity: 0.6; stroke-width: 1.5; transition: stroke 0.25s, stroke-width 0.25s; }
+    .g-edge text { font: 400 11px var(--font-mono); fill: var(--text-muted); text-anchor: middle; }
+    .g-edge text.bg { stroke: var(--bg-card); stroke-width: 4px; stroke-linejoin: round; }
+    .g-edge.removed path { stroke: var(--del); stroke-opacity: 0.85; stroke-dasharray: 5 4; }
+    .g-edge.removed text { fill: var(--del); }
+    .g-edge.added path { stroke: var(--add); stroke-opacity: 1; stroke-width: 2.2; }
+    .g-edge.added text { fill: var(--add); }
+    .g-edge.on path { stroke: var(--accent); stroke-opacity: 1; stroke-width: 3; }
+    .g-edge.on.added path { stroke: var(--add); stroke-width: 3.5; }
+    .g-x { stroke: var(--del); stroke-width: 2.5; stroke-linecap: round; }
+    .g-arrow { fill: var(--text-muted); }
+    .nb-rows { padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+    .nb-sum { font-size: 14px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 4px; }
+    .nb-sum strong { color: var(--text); }
+    .kgram {
+      text-align: left; cursor: pointer; width: 100%;
+      border: 1px solid var(--border); border-radius: var(--radius-sm); background: transparent;
+      padding: 10px 12px; color: var(--text); font: 400 13.5px/1.5 var(--font-sans);
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .kgram:hover, .kgram[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+    .kgram .hop { display: flex; justify-content: space-between; gap: 8px; font: 500 11px var(--font-mono); color: var(--text-muted); letter-spacing: 0.04em; margin-bottom: 4px; }
+    .kgram .mean { font-family: var(--font-serif); font-size: 16px; }
+    .kgram .chain { display: block; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+    .seen { display: inline-flex; gap: 4px; }
+
+    /* ---------- Results ---------- */
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 22px 0 14px; }
+    .stat { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-card); padding: 14px; }
+    .stat .num { font-family: var(--font-serif); font-size: 28px; font-weight: 600; color: var(--text); line-height: 1.15; }
+    .stat .lbl { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; margin-top: 4px; }
+
+    @media (max-width: 860px) {
+      .stats { grid-template-columns: 1fr 1fr; }
+      .nb { grid-template-columns: 1fr; }
+      .nb-graph { border-right: 0; border-bottom: 1px solid var(--border); }
+    }
+    @media (max-width: 640px) {
+      .wide { padding: 0 16px; }
+      .wt-diagram { padding: 12px 10px 4px; }
+      .wt-panel { padding: 14px 14px 18px; }
+      .wt-head { flex-direction: column; align-items: stretch; gap: 10px; }
+      .wt-controls { justify-content: space-between; }
+      .wt-btn.play { flex: 1; }
+      .wt-title { font-size: 16.5px; }
+      .wt-body { min-height: 0; }
+      .two, .cs-compare { grid-template-columns: 1fr; }
+      .quote { font-size: 18px; }
+      .amr { font-size: 12px; }
+      .tree { font-size: 13px; }
+      .mini-table { font-size: 12.5px; }
+      .mini-table th, .mini-table td { padding: 7px 6px; }
+      .stat .num { font-size: 24px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .pedge.flow path { animation: none; stroke-dasharray: none; }
+      .pnode, .pnode rect, .pedge path { transition: none; }
+      .wt-fade { animation: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav class="nav" aria-label="Main">
+    <div class="nav-inner">
+      <a href="../../" class="nav-logo">Ian Yuen</a>
+      <div class="nav-links">
+        <a href="../../#news">News</a>
+        <a href="../../#research">Research</a>
+        <button id="theme-toggle" type="button" aria-label="Toggle dark mode">
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+    <article>
+      <div class="post">
+        <a class="post-back" href="../../#research">← Back to research</a>
+        <p class="post-kicker">// Research · EACL 2027 · Main Conference</p>
+        <h1>LLM-Refiner: Putting Meaning Back in AMR</h1>
+        <p class="post-dek">AMR parsers now match human annotators on the standard metric, yet they still get <em>who did what to whom</em> wrong. LLM-Refiner uses an LLM as a careful editor: it reads the parser's output, finds where the meaning went wrong, and makes small, checked repairs.</p>
+        <div class="post-meta">
+          <span><strong>Ian Yuen</strong>, Douglas S. Chan, Nikita Mishra</span>
+          <a class="pub-link" href="../../assets/papers/llm-refiner-eacl2027.pdf" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16l-5-5h3V4h4v7h3l-5 5zm-7 2h14v2H5v-2z"/></svg>PDF
+          </a>
+        </div>
+
+        <div class="post-body">
+          <h2 id="why"><span class="hash">01</span> Why: high scores, wrong meaning</h2>
+          <p><strong>Abstract Meaning Representation (AMR)</strong> writes a sentence's meaning as a graph: the events, who took part, and how they relate. Graphs like these are a natural bridge between language models and symbolic reasoning. A human expert needs about ten minutes to annotate one sentence, though, so large AMR datasets depend on automatic parsers.</p>
+          <p>Strong parsers such as AMRBart now pass human inter-annotator agreement on <strong>SMATCH</strong>, the standard metric. SMATCH, however, rewards <em>local</em> overlap: it counts matching node–edge–node pieces. A graph can keep almost every piece and still say something different from the sentence.</p>
+          <div class="callout">
+            <strong>The residual semantic gap:</strong> one misplaced edge can flip "the student leaves" into "the teacher leaves" while barely moving the score.
+          </div>
+          <p>Why not let an LLM parse the sentence directly? LLMs on their own are still weaker AMR parsers. GPT-4o reaches about 0.60 SMATCH, against more than 0.83 for AMRBart. They are good at reasoning about meaning, but not at writing exact graph syntax. So we split the work between them.</p>
+
+          <h2 id="what"><span class="hash">02</span> What we built</h2>
+          <ul>
+            <li><strong>LLM-Refiner, a post-editor.</strong> A strong parser does the parsing. An LLM then works through the meaning in three guarded steps (<em>comprehend → diagnose → repair</em>), and a validator makes sure the result is still a valid AMR graph. The LLM only edits; it never starts from scratch, which keeps hallucination in check.</li>
+            <li><strong>A Semantic Test Protocol.</strong> We evaluate on <em>GrAPES</em>, a stress-test set of linguistically hard sentences, with <em>SemBLEU</em>, which compares multi-hop paths rather than single edges. This shows repairs that the standard AMR3 + SMATCH setup undercounts.</li>
+          </ul>
+
+          <h2 id="walkthrough"><span class="hash">03</span> Walkthrough: one sentence through the pipeline</h2>
+          <p>Follow <em>"The teacher asked the student to leave."</em> through every stage. <strong>Press Play</strong>, or click any box in the diagram to jump to it. Below the diagram, each step shows what that stage produces.</p>
+        </div>
+      </div>
+
+      <section class="wide" aria-label="Interactive LLM-Refiner pipeline walkthrough">
+        <div class="card" id="wt">
+          <div class="wt-diagram" id="wt-diagram" aria-hidden="true"></div>
+          <div class="wt-panel">
+            <div class="wt-head">
+              <div>
+                <div class="wt-count" id="wt-count">Step 1 of 9</div>
+                <div class="wt-title" id="wt-title">Input sentence</div>
+              </div>
+              <div class="wt-controls">
+                <button class="wt-btn" id="wt-prev" type="button" aria-label="Previous step">‹</button>
+                <button class="wt-btn play" id="wt-play" type="button">▶ Play</button>
+                <button class="wt-btn" id="wt-next" type="button" aria-label="Next step">›</button>
+              </div>
+            </div>
+            <div class="wt-dots" id="wt-dots" role="tablist" aria-label="Walkthrough steps"></div>
+            <div class="wt-body" id="wt-body" aria-live="polite"></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="post">
+        <div class="post-body" style="margin-top:0">
+          <h2 id="case"><span class="hash">04</span> Case study: why one edge matters</h2>
+          <p>Here is the same sentence side by side. AMRBart's graph matches the human gold graph everywhere except one edge, the one that says <em>who leaves</em>. LLM-Refiner removes that edge and adds the correct one.</p>
+        </div>
+      </div>
+
+      <section class="wide" aria-label="Case study comparison">
+        <div class="cs-compare">
+          <div class="cs-box gold">
+            <h4><span>Gold AMR</span><span>human annotator</span></h4>
+            <div class="tree">ask-01
+├─ ARG0: teacher
+├─ ARG1: student
+└─ ARG2: leave-11
+     └─ ARG0: student</div>
+          </div>
+          <div class="cs-box ours">
+            <h4><span>LLM-Refiner AMR</span><span>AMRBart + repair</span></h4>
+            <div class="tree">ask-01
+├─ ARG0: teacher
+├─ ARG1: student
+└─ ARG2: leave-11
+     <span class="del">└─ ARG0: teacher</span><span class="who">✂ removed</span>
+     <span class="add">└─ ARG0: student</span><span class="who">+ added</span></div>
+          </div>
+          <div class="cs-box gold">
+            <h4><span>Input sentence</span></h4>
+            <p class="sentence">The teacher asked the student to leave.</p>
+          </div>
+          <div class="cs-box ours">
+            <h4><span>Regenerated from the AMR</span></h4>
+            <p class="sentence">The teacher asked the student <del>for the teacher</del> to leave.</p>
+          </div>
+        </div>
+
+        <div class="card nb">
+          <div class="nb-graph" id="nb-graph"></div>
+          <div class="nb-rows">
+            <p class="nb-sum">A one-edge repair fixes meaning at three distances. <strong>SMATCH</strong> counts single hops, so it credits <strong>1</strong> improvement. <strong>SemBLEU</strong> counts multi-hop paths, so it credits all <strong>3</strong>. Tap a row to trace it.</p>
+            <button class="kgram" type="button" data-k="1" aria-pressed="false">
+              <span class="hop"><span>1-hop</span><span class="seen"><span class="tag muted">SMATCH</span><span class="tag muted">SemBLEU</span></span></span>
+              <span class="mean">"student leaves"</span>
+              <span class="chain">leave-11 →ARG0→ student</span>
+            </button>
+            <button class="kgram" type="button" data-k="2" aria-pressed="false">
+              <span class="hop"><span>2-hop</span><span class="seen"><span class="tag muted">SemBLEU</span></span></span>
+              <span class="mean">"student asked to leave"</span>
+              <span class="chain">ask-01 →ARG2→ leave-11 →ARG0→ student</span>
+            </button>
+            <button class="kgram" type="button" data-k="3" aria-pressed="false">
+              <span class="hop"><span>3-hop</span><span class="seen"><span class="tag muted">SemBLEU</span></span></span>
+              <span class="mean">"teacher asked student to leave"</span>
+              <span class="chain">teacher ←ARG0← ask-01 →ARG2→ leave-11 →ARG0→ student</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div class="post">
+        <div class="post-body" style="margin-top:0">
+          <p style="margin-top:16px">We call an element like this edge a <strong>semantic keystone</strong>: a small part of the graph that sits inside many meaning paths, so fixing it changes a lot of meaning for very little structural change. LLM-Refiner's repairs tend to land on keystones, which is why SemBLEU picks them up much better than SMATCH.</p>
+
+          <h2 id="results"><span class="hash">05</span> Results</h2>
+          <p>Starting from AMRBart's outputs on GrAPES:</p>
+          <div class="stats">
+            <div class="stat"><div class="num">+5.2%</div><div class="lbl">SemBLEU on GrAPES</div></div>
+            <div class="stat"><div class="num">+16%</div><div class="lbl">SemBLEU on the sentences LLM-Refiner repaired</div></div>
+            <div class="stat"><div class="num">≈2×</div><div class="lbl">larger gain on SemBLEU than on SMATCH for the same repairs</div></div>
+            <div class="stat"><div class="num">~15 s</div><div class="lbl">and under $0.05 per sentence, vs. ~10 min by hand</div></div>
+          </div>
+          <ul>
+            <li><strong>Linguistic context helps.</strong> Giving the LLM dependency parses and semantic roles from open-source tools improves the SemBLEU gain on GrAPES by 41% compared with going without.</li>
+            <li><strong>It targets real failure modes.</strong> Repairs cluster in known parser weak spots: argument roles, coreference, negation, and missing details. LLM-Refiner repairs about 31% of GrAPES sentences and 6% of the everyday AMR3 sentences.</li>
+            <li><strong>It works with more than one parser.</strong> Swapping AMRBart for SPRING still improves results (+2.1% SemBLEU on GrAPES), with smaller gains because SPRING starts from a stronger baseline.</li>
+            <li><strong>Guardrails matter.</strong> Simply asking an LLM to "repair this AMR" was unstable. Removing the step-by-step reasoning, the linguistic context or the confidence filter made results worse.</li>
+          </ul>
+
+          <h2 id="takeaway"><span class="hash">06</span> Takeaway</h2>
+          <p>AMR parsing and evaluation should ask not only <em>whether a graph matches locally</em>, but <em>whether it preserves the sentence's meaning</em>. Reliable automatic AMR could make symbolic datasets cheap to build at scale, which in turn helps unblock neuro-symbolic research.</p>
+          <p style="font-size:14px;color:var(--text-muted)">Limitations: the Stage 2 prompt has to be tuned for each LLM, results inherit the domain coverage of the underlying parser, and specialized domains such as biomedical text remain future work.</p>
+        </div>
+      </div>
+
+      <div class="post-end">
+        <hr>
+        <div class="post-meta">
+          <a class="pub-link primary" href="../../assets/papers/llm-refiner-eacl2027.pdf" target="_blank" rel="noopener">Read the paper <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="pub-link" href="../../#research">← Back to research</a>
+        </div>
+      </div>
+    </article>
+  </main>
+
+  <footer>
+    <p>&copy; <span id="year">2026</span> Ian Yuen</p>
+  </footer>
+
+  <script src="../../assets/js/site.js"></script>
+  <script src="walkthrough.js"></script>
+</body>
+</html>
